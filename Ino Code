@@ -1,0 +1,708 @@
+
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <SPI.h>
+#include <EEPROM.h> 
+
+// Display Pins
+#define TFT_CS        10
+#define TFT_RST        8
+#define TFT_DC         9
+
+// Touch-Sensor Pins
+#define TOUCH_LINKS   A0
+#define TOUCH_RECHTS  A1
+#define TOUCH_OK      A2
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+
+const int EEPROM_ADDR = 0;       // Für normalen Highscore (Einfach/Mittel/Hard)
+const int EEPROM_ADDR_TIME = 4;  // NEU: Separater EEPROM-Platz für die Endless-Bestzeit
+
+// Spiel-Variablen (10 feste Schienen)
+const int ANZAHL_SCHIENEN = 10;
+const int schienenX[ANZAHL_SCHIENEN] = {12, 34, 56, 78, 100, 122, 144, 166, 188, 210}; 
+
+const int spielerBreite = 18;
+const int spielerHoehe = 16; 
+int spielerSchiene = 4;
+int spielerAltSchiene = 4; 
+int spielerY = 195;  
+
+unsigned long letzterWechsel = 0;
+const int bewegungsVerzoegerung = 120;
+
+// Multi-Gegner-System
+const int MAX_GEGNER = 2;
+int gegnerSchiene[MAX_GEGNER];
+int gegnerAltSchiene[MAX_GEGNER];
+float gegnerY[MAX_GEGNER];
+float gegnerAltY[MAX_GEGNER];
+int aktuelleGegnerGroesse[MAX_GEGNER];
+int altGegnerGroesse[MAX_GEGNER];
+int anzahlAktiveGegner = 1; 
+
+float gegnerGeschwindigkeit = 3.5;
+float basisGeschwindigkeit = 3.5; 
+float geschwindigkeitsZuwachs = 0.1; 
+const int MAX_GEGNER_GROESSE = 22;
+
+// Menü (0=Einfach, 1=Mittel, 2=Hard, 3=Endless)
+int gewaehlteSchwierigkeit = 0; 
+int altGewaehlteSchwierigkeit = -1; 
+
+// Timer Variablen
+unsigned long spielStartZeit = 0;
+int verbleibendeSekunden = 0;
+int zielZeitSekunden = 0; 
+bool hatGewonnen = false;
+int letzterTimerWert = -1; 
+
+// Endless-Zeit-Tracking
+int endlessSekunden = 0;
+int endlessBestTime = 0; // In Sekunden gespeichert
+
+// Hotbar & Item-Variablen
+int hotbarSchilder = 0;     
+int altHotbarSchilder = -1;
+unsigned long letzterOkKlick = 0;
+
+// Pause-System (Gedrückthalten)
+bool istPausiert = false;
+unsigned long okGedruecktSeit = 0;
+bool okWarGedrueckt = false;
+unsigned long pauseStartZeit = 0;
+unsigned long gesamtePauseDauer = 0;
+
+// Power-Up Variablen
+int powerupSchiene = 0;
+int powerupAltSchiene = 0;
+float powerupY = 35;
+float powerupAltY = 35;
+float powerupGeschwindigkeit = 3.0;
+bool powerupAktiv = false; 
+bool powerupAltAktiv = false;
+unsigned long powerupSpawnTimer = 0;
+unsigned long powerupIntervall = 12000; 
+
+// Schild/Unsterblichkeit Variablen
+bool hatSchild = false;
+bool altHatSchild = false;
+unsigned long schildEndeZeit = 0;
+const unsigned long SCHILD_DAUER = 5000; 
+
+// Status-Variablen
+int score = 0;
+int highscore = 0;
+int leben = 3;
+int altLeben = -1;
+bool gameOver = false;
+bool imStartBildschirm = true; 
+
+// Sterne-Hintergrund
+#define ANZAHL_STERNE 30
+int sterneX[ANZAHL_STERNE];
+int sterneY[ANZAHL_STERNE];
+uint16_t sterneFarbe[ANZAHL_STERNE];
+
+const int galaxieX = 120;
+const int galaxieY = 120;
+const int galaxieRadius = 40;
+
+// Vorab-Deklarationen
+void zeichneRahmen();
+void resetGame();
+void aktualisiereUI();
+void zeichneMiniHerz(int x, int y);
+void herzenExplosion();
+void aktualisiereStartBildschirmMenue();
+void zeichneHintergrund();
+void zeichneGalaxie(int x, int y, int radius, uint16_t farbe1, uint16_t farbe2);
+void zeichneSpieler(int x, int y, bool mitSchild);
+void loescheSpieler(int x, int y, bool mitSchild);
+int bestimmeGegnerSchiene();
+void zeichneHotbar(bool forceRedraw);
+bool pruefeKollisionMitGalaxie(int x, int y, int b, int h);
+void repariereHintergrundBereich(int x, int y, int b, int h);
+
+void setup() {
+  pinMode(TFT_RST, OUTPUT);
+  digitalWrite(TFT_RST, HIGH); delay(50);
+  digitalWrite(TFT_RST, LOW);  delay(50);
+  digitalWrite(TFT_RST, HIGH); delay(50);
+
+  tft.init(240, 240);
+  tft.setRotation(0); 
+  tft.fillScreen(ST77XX_BLACK);
+
+  pinMode(TOUCH_LINKS, INPUT);
+  pinMode(TOUCH_RECHTS, INPUT);
+  pinMode(TOUCH_OK, INPUT);
+
+  highscore = EEPROM.read(EEPROM_ADDR);
+  if (highscore == 255) highscore = 0; 
+
+  // Endless Bestzeit auslesen (zwei Bytes für Integer bis 65535 Sekunden)
+  byte highByte = EEPROM.read(EEPROM_ADDR_TIME);
+  byte lowByte = EEPROM.read(EEPROM_ADDR_TIME + 1);
+  endlessBestTime = (highByte << 8) | lowByte;
+  if (endlessBestTime == 65535) endlessBestTime = 0;
+
+  for (int i=0; i<ANZAHL_STERNE; i++) {
+    sterneX[i] = random(10, 230);
+    sterneY[i] = random(35, 210); 
+    sterneFarbe[i] = tft.color565(random(100, 255), random(100, 255), random(100, 255));
+  }
+
+  zeichneRahmen();
+  tft.fillRect(10, 35, 220, 195, ST77XX_BLACK);
+  zeichneHintergrund(); 
+  aktualisiereStartBildschirmMenue();
+}
+
+void loop() {
+  unsigned long aktuelleZeit = millis();
+
+  // STARTBILD-SCHIRM / MENÜ-STEUERUNG
+  if (imStartBildschirm) {
+    if (aktuelleZeit - letzterWechsel >= 200) { 
+      if (digitalRead(TOUCH_LINKS) == HIGH) {
+        delay(6);
+        if (digitalRead(TOUCH_LINKS) == HIGH) {
+          if (gewaehlteSchwierigkeit > 0) {
+            gewaehlteSchwierigkeit--;
+            aktualisiereStartBildschirmMenue();
+            letzterWechsel = aktuelleZeit;
+          }
+        }
+      }
+      else if (digitalRead(TOUCH_RECHTS) == HIGH) {
+        delay(6);
+        if (digitalRead(TOUCH_RECHTS) == HIGH) {
+          if (gewaehlteSchwierigkeit < 3) { 
+            gewaehlteSchwierigkeit++;
+            aktualisiereStartBildschirmMenue();
+            letzterWechsel = aktuelleZeit;
+          }
+        }
+      }
+    }
+
+    if (digitalRead(TOUCH_OK) == HIGH) {
+      imStartBildschirm = false;
+      hatGewonnen = false;
+      resetGame();
+    }
+    delay(15);
+    return;
+  }
+
+  // WINNER OR GAME OVER SCREEN
+  if (gameOver || hatGewonnen) {
+    if (digitalRead(TOUCH_OK) == HIGH) {
+      gameOver = false;
+      hatGewonnen = false;
+      imStartBildschirm = true;
+      tft.fillRect(10, 35, 220, 195, ST77XX_BLACK);
+      zeichneHintergrund(); 
+      altGewaehlteSchwierigkeit = -1; 
+      aktualisiereStartBildschirmMenue();
+    }
+    delay(50); 
+    return;
+  }
+
+  // --- OK-KNOPF LOGIK (HOLD FOR PAUSE / CLICK FOR ITEM) ---
+  if (digitalRead(TOUCH_OK) == HIGH) {
+    if (!okWarGedrueckt) {
+      okGedruecktSeit = aktuelleZeit;
+      okWarGedrueckt = true;
+    }
+    
+    if (!istPausiert && (aktuelleZeit - okGedruecktSeit > 1500)) {
+      istPausiert = true;
+      pauseStartZeit = millis();
+      
+      tft.fillRect(60, 100, 120, 30, ST77XX_BLUE);
+      tft.drawRect(60, 100, 120, 30, ST77XX_WHITE);
+      tft.setCursor(90, 108);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setTextSize(2);
+      tft.print("PAUSE");
+      
+      while(digitalRead(TOUCH_OK) == HIGH); 
+      okWarGedrueckt = false;
+    }
+  } 
+  else {
+    if (okWarGedrueckt) {
+      unsigned long drueckDauer = aktuelleZeit - okGedruecktSeit;
+      okWarGedrueckt = false;
+      
+      if (istPausiert) {
+        istPausiert = false;
+        gesamtePauseDauer += (millis() - pauseStartZeit);
+        tft.fillRect(60, 100, 120, 30, ST77XX_BLACK); 
+        repariereHintergrundBereich(60, 100, 120, 30);
+        zeichneHotbar(true);
+      } 
+      else if (drueckDauer < 1000) {
+        if (hotbarSchilder > 0 && !hatSchild) {
+          hotbarSchilder--;
+          hatSchild = true;
+          schildEndeZeit = millis() + SCHILD_DAUER;
+          zeichneHotbar(false);
+        }
+      }
+    }
+  }
+
+  if (istPausiert) {
+    delay(15);
+    return;
+  }
+
+  // --- SPIEL-UPDATE ---
+
+  // Zeitberechnung im normalen vs. Endless Modus
+  int vergangeneSekunden = ((aktuelleZeit - spielStartZeit) - gesamtePauseDauer) / 1000;
+  
+  if (gewaehlteSchwierigkeit != 3) {
+    // Normaler Modus: Timer läuft rückwärts
+    verbleibendeSekunden = zielZeitSekunden - vergangeneSekunden;
+    if (verbleibendeSekunden != letzterTimerWert) {
+      letzterTimerWert = verbleibendeSekunden;
+      aktualisiereUI(); 
+    }
+
+    if (verbleibendeSekunden <= 0) {
+      hatGewonnen = true;
+      tft.fillRect(10, 35, 220, 195, ST77XX_BLACK); 
+      tft.setCursor(70, 80); // Zentriert
+      tft.setTextColor(ST77XX_GREEN); tft.setTextSize(3); tft.println("SIEG!");
+      
+      tft.setCursor(26, 125); // Korrigiert & Zentriert für 240px Breite
+      tft.setTextColor(ST77XX_WHITE); tft.setTextSize(2);
+      tft.print("Mission geschafft");
+      
+      tft.setCursor(65, 155);
+      tft.setTextColor(ST77XX_YELLOW);
+      tft.print("Score: "); tft.println(score);
+      tft.setCursor(35, 195); tft.setTextColor(ST77XX_CYAN); tft.setTextSize(1);
+      tft.println("Druecke OK fuer Hauptmenue");
+      return;
+    }
+  } else {
+    // Endless Modus: Timer läuft vorwärts
+    endlessSekunden = vergangeneSekunden;
+    if (endlessSekunden != letzterTimerWert) {
+      letzterTimerWert = endlessSekunden;
+      aktualisiereUI();
+    }
+  }
+
+  if (hatSchild && aktuelleZeit >= schildEndeZeit) {
+    hatSchild = false;
+    tft.drawCircle(schienenX[spielerSchiene] + (spielerBreite/2), spielerY + (spielerHoehe/2), 14, ST77XX_BLACK);
+    repariereHintergrundBereich(schienenX[spielerSchiene] - 6, spielerY - 6, spielerBreite + 12, spielerHoehe + 12);
+  }
+
+  // Positionen sichern für das intelligente Überzeichnen
+  spielerAltSchiene = spielerSchiene;
+  altHatSchild = hatSchild;
+
+  for(int g=0; g<anzahlAktiveGegner; g++) {
+    gegnerAltSchiene[g] = gegnerSchiene[g];
+    gegnerAltY[g] = gegnerY[g];
+    altGegnerGroesse[g] = aktuelleGegnerGroesse[g];
+  }
+
+  powerupAltAktiv = powerupAktiv;
+  powerupAltSchiene = powerupSchiene;
+  powerupAltY = powerupY;
+
+  // Touch-Eingabe (Steuerung Schiff)
+  if (aktuelleZeit - letzterWechsel >= bewegungsVerzoegerung) {
+    if (digitalRead(TOUCH_LINKS) == HIGH) {
+      delay(6);
+      if (digitalRead(TOUCH_LINKS) == HIGH) {
+        if (spielerSchiene > 0) { spielerSchiene--; letzterWechsel = aktuelleZeit; }
+      }
+    }
+    else if (digitalRead(TOUCH_RECHTS) == HIGH) {
+      delay(6);
+      if (digitalRead(TOUCH_RECHTS) == HIGH) {
+        if (spielerSchiene < ANZAHL_SCHIENEN - 1) { spielerSchiene++; letzterWechsel = aktuelleZeit; }
+      }
+    }
+  }
+
+  // Spawne neues Power-Up
+  if (!powerupAktiv && (aktuelleZeit - powerupSpawnTimer >= powerupIntervall)) {
+    powerupSpawnTimer = aktuelleZeit;
+    if (random(0, 10) < 5) { 
+      powerupAktiv = true;
+      powerupY = 35;
+      powerupSchiene = random(0, ANZAHL_SCHIENEN);
+    }
+  }
+
+  // Power-Up bewegen
+  if (powerupAktiv) {
+    powerupY += powerupGeschwindigkeit;
+    if (powerupSchiene == spielerSchiene && (powerupY + 12 >= spielerY) && (powerupY <= spielerY + spielerHoehe)) {
+      powerupAktiv = false;
+      if (hotbarSchilder < 2) { hotbarSchilder++; zeichneHotbar(false); }
+    }
+    else if (powerupY > 212) { 
+      powerupAktiv = false;
+    }
+  }
+
+  // Kometen bewegen & berechnen
+  for (int g = 0; g < anzahlAktiveGegner; g++) {
+    gegnerY[g] += gegnerGeschwindigkeit;
+
+    float fortschritt = (gegnerY[g] - 35) / (212 - 35);
+    if (fortschritt < 0) fortschritt = 0;
+    if (fortschritt > 1) fortschritt = 1;
+    aktuelleGegnerGroesse[g] = 4 + (fortschritt * (MAX_GEGNER_GROESSE - 4));
+
+    if (gegnerY[g] > 212 - aktuelleGegnerGroesse[g]) {
+      gegnerY[g] = 35 - (g * 45); 
+      gegnerSchiene[g] = bestimmeGegnerSchiene(); 
+      
+      if (gewaehlteSchwierigkeit != 3) {
+        score++; 
+        if (score > highscore) highscore = score;
+      }
+      
+      basisGeschwindigkeit += geschwindigkeitsZuwachs; 
+      gegnerGeschwindigkeit = basisGeschwindigkeit;
+      aktualisiereUI(); // FEHLER BEHOBEN
+    }
+
+    // Kollisionsabfrage
+    if (gegnerSchiene[g] == spielerSchiene && (gegnerY[g] + aktuelleGegnerGroesse[g] >= spielerY) && (gegnerY[g] <= spielerY + spielerHoehe)) {
+      if (hatSchild) {
+        hatSchild = false; 
+        tft.drawCircle(schienenX[spielerSchiene] + (spielerBreite/2), spielerY + (spielerHoehe/2), 14, ST77XX_BLACK);
+        gegnerY[g] = 35;
+        gegnerSchiene[g] = bestimmeGegnerSchiene();
+      } else {
+        leben--;
+        aktualisiereUI(); // FEHLER BEHOBEN
+        gegnerGeschwindigkeit = 1.5; 
+        herzenExplosion();
+        
+        tft.fillRect(10, 35, 220, 177, ST77XX_BLACK); 
+        zeichneRahmen();
+        zeichneHintergrund(); 
+        zeichneHotbar(true);
+
+        for (int i = 0; i < anzahlAktiveGegner; i++) {
+          gegnerY[i] = 35 - (i * 45);
+          gegnerSchiene[i] = bestimmeGegnerSchiene();
+        }
+        if (powerupAktiv) powerupAktiv = false;
+
+        if (leben <= 0) {
+          gameOver = true;
+          
+          tft.fillRect(10, 35, 220, 195, ST77XX_BLACK); 
+          tft.setCursor(45, 80); tft.setTextColor(ST77XX_RED); tft.setTextSize(3); tft.println("GAME OVER");
+          tft.setCursor(55, 125); tft.setTextColor(ST77XX_WHITE); tft.setTextSize(2);
+          
+          if (gewaehlteSchwierigkeit != 3) {
+            EEPROM.write(EEPROM_ADDR, highscore);
+            tft.print("Score: "); tft.println(score);
+            tft.setCursor(55, 150); tft.setTextColor(ST77XX_YELLOW);
+            tft.print("BEST: "); tft.println(highscore);
+          } else {
+            if (endlessSekunden > endlessBestTime) {
+              endlessBestTime = endlessSekunden;
+              EEPROM.write(EEPROM_ADDR_TIME, (endlessBestTime >> 8) & 0xFF);
+              EEPROM.write(EEPROM_ADDR_TIME + 1, endlessBestTime & 0xFF);
+            }
+            int m = endlessSekunden / 60; int s = endlessSekunden % 60;
+            tft.print("Zeit: "); if(m<10)tft.print("0"); tft.print(m); tft.print(":"); if(s<10)tft.print("0"); tft.println(s);
+            
+            tft.setCursor(55, 150); tft.setTextColor(ST77XX_YELLOW);
+            int bm = endlessBestTime / 60; int bs = endlessBestTime % 60;
+            tft.print("BEST: "); if(bm<10)tft.print("0"); tft.print(bm); tft.print(":"); if(bs<10)tft.print("0"); tft.println(bs);
+          }
+          
+          tft.setCursor(35, 190); tft.setTextColor(ST77XX_CYAN); tft.setTextSize(1); tft.println("Druecke OK fuer Hauptmenue");
+        }
+        break; 
+      }
+    }
+  }
+
+  // --- SMART RENDERING SYSTEM ---
+  if (!gameOver && !hatGewonnen) {
+    if (powerupAltAktiv) {
+      if (!powerupAktiv || powerupAltSchiene != powerupSchiene || (int)powerupAltY != (int)powerupY) {
+        tft.fillRect(schienenX[powerupAltSchiene] + 2, (int)powerupAltY, 14, 14, ST77XX_BLACK);
+        repariereHintergrundBereich(schienenX[powerupAltSchiene] + 2, (int)powerupAltY, 14, 14);
+      }
+    }
+
+    for (int g = 0; g < anzahlAktiveGegner; g++) {
+      if (gegnerAltY[g] >= 35) {
+        int altX = schienenX[gegnerAltSchiene[g]] + (18 / 2) - (altGegnerGroesse[g] / 2);
+        if (gegnerAltSchiene[g] != gegnerSchiene[g] || (int)gegnerAltY[g] != (int)gegnerY[g]) {
+          tft.fillRect(altX, (int)gegnerAltY[g], altGegnerGroesse[g], altGegnerGroesse[g], ST77XX_BLACK);
+          repariereHintergrundBereich(altX, (int)gegnerAltY[g], altGegnerGroesse[g], altGegnerGroesse[g]);
+        }
+      }
+    }
+
+    if (spielerAltSchiene != spielerSchiene || altHatSchild != hatSchild) {
+      loescheSpieler(schienenX[spielerAltSchiene], spielerY, altHatSchild);
+      repariereHintergrundBereich(schienenX[spielerAltSchiene] - 6, spielerY - 6, spielerBreite + 12, spielerHoehe + 12);
+    }
+
+    if (powerupAktiv) {
+      int pX = schienenX[powerupSchiene] + 2;
+      tft.fillRect(pX, (int)powerupY, 14, 14, ST77XX_BLUE);
+      tft.drawRect(pX, (int)powerupY, 14, 14, ST77XX_WHITE);
+      tft.setCursor(pX + 4, (int)powerupY + 3); tft.setTextColor(ST77XX_WHITE); tft.setTextSize(1); tft.print("P");
+    }
+
+    for (int g = 0; g < anzahlAktiveGegner; g++) {
+      if (gegnerY[g] >= 35) { 
+        int zeichneX = schienenX[gegnerSchiene[g]] + (18 / 2) - (aktuelleGegnerGroesse[g] / 2);
+        tft.fillRect(zeichneX, (int)gegnerY[g], aktuelleGegnerGroesse[g], aktuelleGegnerGroesse[g], ST77XX_RED);
+        if (aktuelleGegnerGroesse[g] > 8) {
+          tft.fillRect(zeichneX + 2, (int)gegnerY[g] + 2, aktuelleGegnerGroesse[g] - 4, aktuelleGegnerGroesse[g] - 4, ST77XX_ORANGE);
+        }
+      }
+    }
+
+    zeichneSpieler(schienenX[spielerSchiene], spielerY, hatSchild);
+    
+    tft.drawFastHLine(10, 213, 220, ST77XX_CYAN);
+    zeichneHotbar(false);
+  }
+
+  delay(15); 
+}
+
+void repariereHintergrundBereich(int x, int y, int b, int h) {
+  if (pruefeKollisionMitGalaxie(x, y, b, h)) {
+    zeichneGalaxie(galaxieX, galaxieY, galaxieRadius, ST77XX_MAGENTA, ST77XX_CYAN);
+  }
+  for (int i=0; i<ANZAHL_STERNE; i++) {
+    if (sterneX[i] >= x && sterneX[i] <= x+b && sterneY[i] >= y && sterneY[i] <= y+h) {
+      tft.drawPixel(sterneX[i], sterneY[i], sterneFarbe[i]);
+    }
+  }
+}
+
+bool pruefeKollisionMitGalaxie(int x, int y, int b, int h) {
+  int dateiMitteX = x + b/2;
+  int dateiMitteY = y + h/2;
+  int dx = dateiMitteX - galaxieX;
+  int dy = dateiMitteY - galaxieY;
+  return (sqrt(dx*dx + dy*dy) <= galaxieRadius + 8);
+}
+
+int bestimmeGegnerSchiene() {
+  int zufall = random(0, 100);
+  if (zufall < 50) return spielerSchiene;
+  else if (zufall < 85) { 
+    int neueSchiene = spielerSchiene + (random(0, 2) == 0 ? -1 : 1);
+    return constrain(neueSchiene, 0, ANZAHL_SCHIENEN - 1);
+  } 
+  return random(0, ANZAHL_SCHIENEN);
+}
+
+void zeichneHotbar(bool forceRedraw) {
+  if (!forceRedraw && hotbarSchilder == altHotbarSchilder) return;
+  altHotbarSchilder = hotbarSchilder;
+
+  tft.fillRect(10, 214, 220, 17, tft.color565(30, 30, 45));
+  tft.setCursor(16, 219); tft.setTextColor(ST77XX_WHITE); tft.setTextSize(1); tft.print("HOTBAR:");
+
+  tft.drawRect(65, 216, 25, 13, ST77XX_WHITE);
+  if (hotbarSchilder >= 1) {
+    tft.fillRect(67, 218, 21, 9, ST77XX_BLUE); tft.setCursor(73, 219); tft.setTextColor(ST77XX_WHITE); tft.print("S");
+  }
+  tft.drawRect(95, 216, 25, 13, ST77XX_WHITE);
+  if (hotbarSchilder == 2) {
+    tft.fillRect(97, 218, 21, 9, ST77XX_BLUE); tft.setCursor(103, 219); tft.setTextColor(ST77XX_WHITE); tft.print("S");
+  }
+  tft.setCursor(130, 219); tft.setTextColor(ST77XX_CYAN); // FEHLER BEHOBEN (pX entfernt)
+  tft.print("[OK] klick  [HOLD] Pause");
+}
+
+void zeichneSpieler(int x, int y, bool mitSchild) {
+  tft.fillTriangle(x + 9, y, x + 3, y + 12, x + 15, y + 12, 0x03E0);
+  tft.fillTriangle(x + 9, y + 3, x + 6, y + 11, x + 12, y + 11, ST77XX_GREEN);
+  tft.fillRect(x, y + 10, 4, 6, ST77XX_GREEN);
+  tft.drawFastVLine(x, y + 8, 3, ST77XX_CYAN);
+  tft.fillRect(x + 14, y + 10, 4, 6, ST77XX_GREEN);
+  tft.drawFastVLine(x + 17, y + 8, 3, ST77XX_CYAN);
+  tft.fillRect(x + 8, y + 6, 3, 3, ST77XX_BLUE);
+  if (mitSchild) {
+    tft.drawCircle(x + 9, y + 8, 13, ST77XX_CYAN);
+    tft.drawCircle(x + 9, y + 8, 14, 0x001F); 
+  }
+}
+
+void loescheSpieler(int x, int y, bool mitSchild) {
+  tft.fillRect(x, y, spielerBreite, spielerHoehe, ST77XX_BLACK);
+  tft.drawCircle(x + 9, y + 8, 13, ST77XX_BLACK);
+  tft.drawCircle(x + 9, y + 8, 14, ST77XX_BLACK);
+}
+
+void zeichneHintergrund() {
+  zeichneGalaxie(galaxieX, galaxieY, galaxieRadius, ST77XX_MAGENTA, ST77XX_CYAN); 
+  for (int i=0; i<ANZAHL_STERNE; i++) tft.drawPixel(sterneX[i], sterneY[i], sterneFarbe[i]);
+}
+
+void zeichneGalaxie(int x, int y, int radius, uint16_t farbe1, uint16_t farbe2) {
+  tft.fillCircle(x, y, radius/4, ST77XX_WHITE);
+  tft.drawCircle(x, y, radius/4 + 1, farbe1);
+  tft.drawCircle(x, y, radius/4 + 2, farbe1);
+  for(int i=0; i<360; i+=10) {
+    float rad = i * 0.0174533;
+    int px = x + cos(rad) * (radius/2 + i/12.0);
+    int py = y + sin(rad) * (radius/4 + i/24.0);
+    if (py < 212) { 
+      tft.drawPixel(px, py, (i < 180) ? farbe1 : farbe2);
+    }
+  }
+}
+
+void aktualisiereStartBildschirmMenue() {
+  if (gewaehlteSchwierigkeit == altGewaehlteSchwierigkeit) return;
+  altGewaehlteSchwierigkeit = gewaehlteSchwierigkeit;
+
+  tft.fillRect(20, 35, 200, 170, ST77XX_BLACK);
+  zeichneHintergrund(); 
+
+  tft.setCursor(85, 40);
+  tft.setTextColor(0x7BEF); 
+  tft.setTextSize(1);
+  tft.println("Von Marian69");
+
+  tft.setCursor(35, 60);
+  tft.setTextColor(ST77XX_GREEN); tft.setTextSize(3); tft.println("SPACE RUN");
+  
+  tft.setTextSize(2);
+  tft.setCursor(35, 100);
+  tft.setTextColor(gewaehlteSchwierigkeit == 0 ? ST77XX_YELLOW : 0x52AA); tft.println(gewaehlteSchwierigkeit == 0 ? "> EINFACH <" : "  EINFACH  ");
+  tft.setCursor(35, 123);
+  tft.setTextColor(gewaehlteSchwierigkeit == 1 ? ST77XX_YELLOW : 0x52AA); tft.println(gewaehlteSchwierigkeit == 1 ? "> MITTEL  <" : "  MITTEL   ");
+  tft.setCursor(35, 146);
+  tft.setTextColor(gewaehlteSchwierigkeit == 2 ? ST77XX_YELLOW : 0x52AA); tft.println(gewaehlteSchwierigkeit == 2 ? "> HARD    <" : "  HARD     ");
+  tft.setCursor(35, 169);
+  tft.setTextColor(gewaehlteSchwierigkeit == 3 ? ST77XX_YELLOW : 0x52AA); tft.println(gewaehlteSchwierigkeit == 3 ? "> ENDLESS <" : "  ENDLESS  ");
+
+  tft.setCursor(35, 195); 
+  tft.setTextSize(1);
+  if (gewaehlteSchwierigkeit == 3) {
+    tft.setTextColor(ST77XX_YELLOW);
+    int bm = endlessBestTime / 60; int bs = endlessBestTime % 60;
+    tft.print("BEST TIME: "); if(bm<10)tft.print("0"); tft.print(bm); tft.print(":"); if(bs<10)tft.print("0"); tft.println(bs);
+  } else {
+    tft.setTextColor(ST77XX_WHITE);
+    tft.println("L/R: Waehlen   OK: Starten");
+  }
+}
+
+void herzenExplosion() {
+  int mitteX = 120; int mitteY = 120;
+  tft.fillCircle(mitteX - 15, mitteY - 10, 15, ST77XX_RED);
+  tft.fillCircle(mitteX + 15, mitteY - 10, 15, ST77XX_RED);
+  tft.fillTriangle(mitteX - 30, mitteY - 2, mitteX + 30, mitteY - 2, mitteX, mitteY + 30, ST77XX_RED);
+  delay(500); 
+  for (int r = 10; r < 70; r += 12) {
+    tft.fillRect(10, 35, 220, 177, ST77XX_BLACK);
+    zeichneRahmen(); 
+    tft.fillRect(mitteX + r, mitteY, 6, 6, ST77XX_RED); tft.fillRect(mitteX - r, mitteY, 6, 6, ST77XX_RED);
+    tft.fillRect(mitteX, mitteY + r, 6, 6, ST77XX_RED); tft.fillRect(mitteX, mitteY - r, 6, 6, ST77XX_RED);
+    delay(60); 
+  }
+}
+
+void zeichneMiniHerz(int x, int y) {
+  tft.fillRect(x+1, y, 2, 2, ST77XX_RED); tft.fillRect(x+5, y, 2, 2, ST77XX_RED);
+  tft.fillRect(x, y+2, 8, 2, ST77XX_RED); tft.fillRect(x+1, y+4, 6, 2, ST77XX_RED);
+  tft.fillRect(x+3, y+6, 2, 2, ST77XX_RED);
+}
+
+void zeichneRahmen() {
+  tft.drawRect(0, 0, 240, 240, ST77XX_CYAN);  tft.drawRect(1, 1, 238, 238, ST77XX_CYAN);
+  tft.drawFastHLine(2, 30, 236, ST77XX_CYAN); tft.drawRect(8, 33, 224, 199, 0x4433); 
+}
+
+void aktualisiereUI() {
+  if (leben != altLeben) {
+    tft.fillRect(150, 14, 80, 12, ST77XX_BLACK);
+    altLeben = leben;
+  }
+  tft.fillRect(54, 12, 30, 10, ST77XX_BLACK);
+  tft.fillRect(148, 4, 80, 10, ST77XX_BLACK);
+  
+  tft.setTextColor(ST77XX_WHITE); tft.setTextSize(1);
+  
+  if (gewaehlteSchwierigkeit != 3) {
+    tft.setCursor(12, 12); tft.print("SCORE: "); tft.setTextColor(ST77XX_GREEN); tft.print(score);
+    tft.setTextColor(ST77XX_WHITE); tft.setCursor(85, 12); tft.print("HI: "); tft.setTextColor(ST77XX_YELLOW); tft.print(highscore);
+    
+    tft.setCursor(148, 4);
+    tft.setTextColor(ST77XX_CYAN);
+    int min = verbleibendeSekunden / 60; int sek = verbleibendeSekunden % 60;
+    tft.print("ZEIT:");
+    if(min < 10) tft.print("0"); tft.print(min); tft.print(":");
+    if(sek < 10) tft.print("0"); tft.print(sek);
+  } else {
+    tft.setCursor(12, 12); tft.print("ZEIT: ");
+    tft.setTextColor(ST77XX_GREEN);
+    int em = endlessSekunden / 60; int es = endlessSekunden % 60;
+    if(em<10) tft.print("0"); tft.print(em); tft.print(":"); if(es<10) tft.print("0"); tft.print(es);
+    
+    tft.setTextColor(ST77XX_WHITE); tft.setCursor(85, 12); tft.print("BEST: ");
+    tft.setTextColor(ST77XX_YELLOW);
+    int ebm = endlessBestTime / 60; int ebs = endlessBestTime % 60;
+    if(ebm<10) tft.print("0"); tft.print(ebm); tft.print(":"); if(ebs<10) tft.print("0"); tft.print(ebs);
+
+    tft.setCursor(148, 4);
+    tft.setTextColor(ST77XX_MAGENTA); tft.print("INF MODE");
+  }
+  
+  tft.setTextColor(ST77XX_WHITE); tft.setCursor(155, 15); tft.print("HP: ");
+  for(int i = 0; i < leben; i++) zeichneMiniHerz(180 + (i * 12), 14); 
+}
+
+void resetGame() {
+  score = 0; leben = 3; altLeben = -1; powerupAktiv = false; hatSchild = false; hotbarSchilder = 0; altHotbarSchilder = -1;
+  istPausiert = false; gesamtePauseDauer = 0; okWarGedrueckt = false; endlessSekunden = 0;
+  powerupSpawnTimer = millis(); spielStartZeit = millis(); letzterTimerWert = -1; spielerSchiene = 4; spielerAltSchiene = 4;
+
+  if (gewaehlteSchwierigkeit == 0) { 
+    anzahlAktiveGegner = 1; basisGeschwindigkeit = 2.5; geschwindigkeitsZuwachs = 0.04; zielZeitSekunden = 60; powerupIntervall = 6000;  
+  } else if (gewaehlteSchwierigkeit == 1) { 
+    anzahlAktiveGegner = 2; basisGeschwindigkeit = 3.2; geschwindigkeitsZuwachs = 0.08; zielZeitSekunden = 120; powerupIntervall = 12000; 
+  } else if (gewaehlteSchwierigkeit == 2) { 
+    anzahlAktiveGegner = 2; basisGeschwindigkeit = 4.5; geschwindigkeitsZuwachs = 0.15; zielZeitSekunden = 180; powerupIntervall = 18000; 
+  } else if (gewaehlteSchwierigkeit == 3) { 
+    anzahlAktiveGegner = 2; basisGeschwindigkeit = 3.5; geschwindigkeitsZuwachs = 0.12; zielZeitSekunden = 9999; powerupIntervall = 18000; 
+  }
+
+  gegnerGeschwindigkeit = basisGeschwindigkeit;
+  for (int i = 0; i < anzahlAktiveGegner; i++) {
+    gegnerY[i] = 35 - (i * 45); gegnerAltY[i] = gegnerY[i];
+    gegnerSchiene[i] = bestimmeGegnerSchiene(); gegnerAltSchiene[i] = gegnerSchiene[i];
+    aktuelleGegnerGroesse[i] = 4; altGegnerGroesse[i] = 4;
+  }
+  
+  tft.fillScreen(ST77XX_BLACK);
+  zeichneRahmen();
+  zeichneHintergrund(); 
+  zeichneHotbar(true);
+  aktualisiereUI(); // FEHLER BEHOBEN
+}
