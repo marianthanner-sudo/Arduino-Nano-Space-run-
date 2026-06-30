@@ -1,7 +1,7 @@
 # Arduino-Nano-Space-run-
 Small Project with Arduino Nano and an ST7789 OLED display, with which you can play Space Run, a small game I coded where you dodge meteors with a space shuttle. Pretty good for beginners. 
 
-It has 4 modes easy, middle, hard and endless also has a hotbar where you can stack shield powerups und a timer and when it runs out you win (except for endless mode)
+the new version uses 2 buttons left and right the game has 3 game modes one is normal dodge game second is like a line passing game and thrird is a simon says have fun :))
 
 Materials:
 
@@ -28,10 +28,6 @@ gnd - gnd
 vcc - 3v3 
 out - A0
 
-ok touch: (up)
-gnd - gnd
-vcc - 3v3 
-out - A2
 
 right touch:
 gnd - gnd
